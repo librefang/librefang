@@ -36,6 +36,7 @@ pub mod registry_paths;
 pub mod registry_schema;
 pub mod scheduler;
 pub mod serde_compat;
+pub mod skill_history;
 pub mod subagent;
 pub mod taint;
 pub mod task;

@@ -179,6 +179,7 @@ impl HandsControl for NoopKernelHandle {}
 impl A2ARegistry for NoopKernelHandle {}
 impl ChannelSender for NoopKernelHandle {}
 impl PromptStore for NoopKernelHandle {}
+impl SkillHistory for NoopKernelHandle {}
 impl WorkflowRunner for NoopKernelHandle {}
 impl GoalControl for NoopKernelHandle {}
 impl ToolPolicy for NoopKernelHandle {}

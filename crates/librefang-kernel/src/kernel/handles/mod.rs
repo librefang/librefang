@@ -27,6 +27,7 @@ mod knowledge_graph;
 mod memory_access;
 mod prompt_store;
 mod session_writer;
+mod skill_history;
 mod task_queue;
 mod tool_policy;
 mod wiki_access;

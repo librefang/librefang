@@ -13,6 +13,7 @@ import {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  restoreSkillVersion,
   proposeSkillToRegistry,
   approvePendingCandidate,
   rejectPendingCandidate,
@@ -194,6 +195,26 @@ export function useEvolveRollbackSkill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ name }: { name: string }) => evolveRollbackSkill(name),
+    onSuccess: (_data, variables) => {
+      invalidateEvolvedSkill(qc, variables.name);
+    },
+  });
+}
+
+/**
+ * Restore a skill to a prior store version (#8021).
+ *
+ * The restore overwrites the skill's current `skill.toml` and
+ * `prompt_context.md` and records the restore itself as the newest snapshot,
+ * so it invalidates the same set a rollback does — which includes the history
+ * key, because `skillKeys.history(name)` is nested under
+ * `skillKeys.detail(name)`.
+ */
+export function useRestoreSkillVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, versionId }: { name: string; versionId: number }) =>
+      restoreSkillVersion(name, versionId),
     onSuccess: (_data, variables) => {
       invalidateEvolvedSkill(qc, variables.name);
     },

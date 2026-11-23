@@ -65,6 +65,14 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
         .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
         .route(
+            "/skills/{name}/history",
+            axum::routing::get(list_skill_history),
+        )
+        .route(
+            "/skills/{name}/history/{version_id}/restore",
+            axum::routing::post(restore_skill_version),
+        )
+        .route(
             "/skills/{name}/propose",
             axum::routing::post(propose_skill_to_registry),
         )

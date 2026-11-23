@@ -79,6 +79,7 @@ mod knowledge_graph;
 mod memory_access;
 mod prompt_store;
 mod session_writer;
+mod skill_history;
 mod task_queue;
 mod tool_policy;
 mod wiki_access;
@@ -100,13 +101,14 @@ pub use knowledge_graph::*;
 pub use memory_access::*;
 pub use prompt_store::*;
 pub use session_writer::*;
+pub use skill_history::*;
 pub use task_queue::*;
 pub use tool_policy::*;
 pub use wiki_access::*;
 pub use workflow_runner::*;
 
 // ============================================================================
-// KernelHandle — supertrait alias of all 20 role traits.
+// KernelHandle — supertrait alias of all 21 role traits.
 //
 // Existing call sites take `Arc<dyn KernelHandle>`; that keeps working because
 // any type that impls every role trait automatically gets `KernelHandle` via
@@ -132,6 +134,7 @@ pub trait KernelHandle:
     + ToolPolicy
     + ApiAuth
     + SessionWriter
+    + SkillHistory
     + AcpFsBridge
     + AcpTerminalBridge
     + CatalogQuery
@@ -158,6 +161,7 @@ impl<T> KernelHandle for T where
         + ToolPolicy
         + ApiAuth
         + SessionWriter
+        + SkillHistory
         + AcpFsBridge
         + AcpTerminalBridge
         + CatalogQuery
@@ -176,9 +180,9 @@ pub mod prelude {
         AcpTerminalRunResult, AgentControl, AgentInfo, AgentTypeSummary, ApiAuth, ApiAuthSnapshot,
         ApiUserConfigSnapshot, ApprovalGate, AsyncSendOutcome, CatalogQuery, ChannelSender,
         CronControl, DashboardRawConfig, EventBus, GoalControl, HandsControl, KernelHandle,
-        KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, StepOutputSummary, TaskQueue,
-        ToolPolicy, WikiAccess, WorkflowDescription, WorkflowInputParam, WorkflowRunSummary,
-        WorkflowRunner, WorkflowSummary,
+        KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, SkillHistory, StepOutputSummary,
+        TaskQueue, ToolPolicy, WikiAccess, WorkflowDescription, WorkflowInputParam,
+        WorkflowRunSummary, WorkflowRunner, WorkflowSummary,
     };
 }
 

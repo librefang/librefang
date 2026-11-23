@@ -181,6 +181,7 @@ impl ApprovalGate for RosterKernel {}
 impl HandsControl for RosterKernel {}
 impl A2ARegistry for RosterKernel {}
 impl PromptStore for RosterKernel {}
+impl SkillHistory for RosterKernel {}
 impl WorkflowRunner for RosterKernel {}
 impl GoalControl for RosterKernel {}
 impl ToolPolicy for RosterKernel {}

@@ -225,6 +225,7 @@ impl HandsControl for CapturingKernel {}
 impl A2ARegistry for CapturingKernel {}
 impl ChannelSender for CapturingKernel {}
 impl PromptStore for CapturingKernel {}
+impl SkillHistory for CapturingKernel {}
 impl WorkflowRunner for CapturingKernel {}
 impl GoalControl for CapturingKernel {}
 impl ToolPolicy for CapturingKernel {}
