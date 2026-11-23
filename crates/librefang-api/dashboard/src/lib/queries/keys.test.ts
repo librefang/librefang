@@ -27,6 +27,7 @@ import {
   mediaKeys,
   mcpKeys,
   pluginKeys,
+  contextEngineKeys,
   registryKeys,
   telemetryKeys,
   vaultKeys,
@@ -556,6 +557,27 @@ describe("query key factories", () => {
     });
   });
 
+  describe("contextEngineKeys", () => {
+    it("anchors every route key under contextEngineKeys.all", () => {
+      const prefix = contextEngineKeys.all;
+      expect(contextEngineKeys.all).toEqual(["contextEngine"]);
+      for (const key of [
+        contextEngineKeys.health(),
+        contextEngineKeys.chain(),
+        contextEngineKeys.metrics(),
+        contextEngineKeys.traces(),
+        contextEngineKeys.config(),
+        contextEngineKeys.sandboxPolicy(),
+      ]) {
+        expect(key.slice(0, prefix.length)).toEqual(prefix);
+      }
+      expect(contextEngineKeys.sandboxPolicy()).toEqual([
+        "contextEngine",
+        "sandbox-policy",
+      ]);
+    });
+  });
+
   describe("vaultKeys", () => {
     it("lists and list are prefixed with vaultKeys.all", () => {
       const prefix = vaultKeys.all;
@@ -599,6 +621,7 @@ describe("query key factories", () => {
       mediaKeys,
       mcpKeys,
       pluginKeys,
+      contextEngineKeys,
       configKeys,
       registryKeys,
       telemetryKeys,

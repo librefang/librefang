@@ -4843,5 +4843,89 @@
     "size_hint": "每份文档最大 {{limit}}",
     "too_large": "{{name}} 为 {{size}} — 文档最大不能超过 {{limit}}。",
     "no_agents": "尚无可共享的代理。"
+  },
+  "context_engine": {
+    "nav": "上下文引擎",
+    "title": "上下文引擎",
+    "subtitle": "插件链路、钩子指标与最近追踪",
+    "badge": "可观测性",
+    "load_error": "无法加载上下文引擎状态。",
+    "no_engine": "未启用插件引擎",
+    "no_engine_desc": "配置上下文引擎插件后可收集钩子指标与追踪。",
+    "health": {
+      "title": "引擎健康",
+      "healthy": "健康",
+      "unhealthy": "异常",
+      "active_plugins": "活动插件",
+      "issues": "问题",
+      "no_issues": "未报告问题"
+    },
+    "chain": {
+      "title": "插件链路",
+      "mode": "模式",
+      "mode_default": "默认",
+      "mode_single": "单插件",
+      "mode_stacked": "堆叠",
+      "length": "链路长度",
+      "fallback": "回退",
+      "plugin_error": "插件不可用",
+      "disabled": "已停用",
+      "invalid": "钩子无效",
+      "cache_ttl": "缓存 TTL"
+    },
+    "metrics": {
+      "title": "钩子指标",
+      "hook": "钩子",
+      "calls": "调用",
+      "successes": "成功",
+      "failures": "失败",
+      "avg_latency": "平均延迟"
+    },
+    "traces": {
+      "title": "最近追踪",
+      "count": "{{total}} 条追踪",
+      "empty": "暂无追踪",
+      "empty_desc": "引擎处理一轮对话后，钩子调用将显示在这里。",
+      "success": "成功",
+      "failure": "失败",
+      "input": "输入",
+      "output": "输出",
+      "annotations": "注解",
+      "error": "错误",
+      "trace_id": "追踪"
+    },
+    "config": {
+      "title": "引擎配置",
+      "engine": "引擎",
+      "plugin": "插件",
+      "timeout": "钩子超时",
+      "on_failure": "钩子失败时",
+      "max_retries": "最大重试次数",
+      "retry_delay": "重试延迟",
+      "hook_cache_ttl": "钩子缓存 TTL",
+      "assemble_cache_ttl": "组装缓存 TTL",
+      "compact_cache_ttl": "压缩缓存 TTL",
+      "allow_network": "允许网络",
+      "allow_filesystem": "允许文件系统",
+      "max_memory": "最大内存",
+      "circuit_breaker": "熔断器",
+      "registries": "注册表"
+    },
+    "sandbox": {
+      "title": "沙箱策略",
+      "default_mode": "默认策略 — 未启用插件引擎",
+      "allowed": "允许",
+      "denied": "禁止",
+      "filesystem": "文件系统",
+      "network": "网络",
+      "memory": "内存",
+      "persistent": "常驻子进程",
+      "prewarm": "子进程预热",
+      "queue_depth": "回合后队列深度",
+      "circuit_breaker": "熔断器",
+      "otel_endpoint": "OTel 端点",
+      "unlimited": "不限",
+      "plugin_error": "策略不可用"
+    }
   }
 }
