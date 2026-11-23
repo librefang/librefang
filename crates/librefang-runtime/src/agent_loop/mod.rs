@@ -1804,12 +1804,14 @@ async fn run_agent_loop_inner(
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
-        // Catalog-driven reasoning policy (#8591). Undeclared keeps the legacy
-        // wire spellings; a declared set drives verbatim passthrough and
+        // Catalog-driven reasoning policy (#8591). Resolved for the manifest's
+        // provider so a same-id model under another provider cannot borrow a
+        // declaration it never published (#8616 review). Undeclared constrains
+        // to the legacy rungs; a declared set drives verbatim passthrough and
         // nearest-rung coercion, and is what the drivers gate on.
         let reasoning_policy = kernel
             .as_ref()
-            .map(|k| k.reasoning_policy_for(&api_model))
+            .map(|k| k.reasoning_policy_for(&manifest.model.provider, &api_model))
             .unwrap_or_default();
 
         // Catalog-driven vision-capability gate (#6010, refs #7957). Only a model the catalog

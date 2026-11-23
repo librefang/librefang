@@ -139,6 +139,16 @@ describe("chat transcript scale", () => {
     expect(migratePersistedUIState({ theme: "light" }).chatScale).toBe(DEFAULT_CHAT_SCALE);
   });
 
+  it("marks an existing deep-thinking preference as deliberate on migration (#8616)", async () => {
+    const { migratePersistedUIState } = await import("./store");
+    // Builds before #8616 had no "touched" flag; a persisted `true` proves the
+    // user toggled it, so the migration keeps sending the boolean. A default
+    // `false` profile stays untouched, and the frame then omits the key.
+    expect(migratePersistedUIState({ deepThinking: true }).deepThinkingTouched).toBe(true);
+    expect(migratePersistedUIState({}).deepThinkingTouched).toBe(false);
+    expect(migratePersistedUIState({}).deepThinking).toBe(false);
+  });
+
   it("clamps through the setter too, not only on load", async () => {
     const { useUIStore, MIN_CHAT_SCALE, MAX_CHAT_SCALE } = await import("./store");
 

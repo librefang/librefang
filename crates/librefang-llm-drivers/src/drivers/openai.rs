@@ -936,7 +936,9 @@ fn generic_reasoning_effort(mode: &ReasoningMode, declared: bool) -> String {
 ///   it at manifest-resolution time; this is the wire-side backstop for
 ///   callers that build a `CompletionRequest` directly). `none` on a model
 ///   with `off_allowed = false` / `mandatory = true` becomes the lowest graded
-///   rung. An undeclared policy passes everything through untouched.
+///   rung. An undeclared policy constrains the token to the four legacy rungs
+///   with the same rule, because those are the spellings every endpoint
+///   already accepted before #8591.
 /// * **Enum and budget are never parallel.** Once a model declares an enum,
 ///   the `budget_tokens` bucket is *not* consulted: the control is the declared
 ///   effort, and an unset effort stays absent (provider default). The bucket
@@ -996,8 +998,9 @@ fn reasoning_wire_fields(
     }
 
     let declared = policy.is_declared();
-    // Coerce the requested token into the model's declared set. Undeclared →
-    // verbatim. The kernel logs the coercion; here it only shapes the wire.
+    // Coerce the requested token into the model's declared set; undeclared
+    // models are constrained to the legacy rungs. The kernel logs the
+    // coercion; here it only shapes the wire.
     let mode: Option<ReasoningMode> = mode.map(|m| policy.coerce(m).effective);
 
     if family == ReasoningWireFamily::OpenRouter {
@@ -4620,17 +4623,22 @@ mod tests {
     }
 
     /// #8591: DeepSeek V4's direct dialect carries the gate plus the token
-    /// verbatim. `medium` / `xhigh` / `minimal` used to be unrepresentable in
-    /// the four-rung enum; now they are emitted as asked, and V4 itself is the
-    /// one that decides whether a compatibility spelling folds server-side.
+    /// verbatim **when the model declares it**. The open-vocabulary rungs
+    /// (`medium`, `xhigh`, `minimal`) are emitted as asked on a declaring
+    /// model, and constrained to the nearest legacy rung on an undeclared one
+    /// (#8616 review) — V4 no longer receives a rung it never published just
+    /// because a caller named it.
     #[test]
-    fn deepseek_v4_direct_new_tokens_travel_verbatim() {
+    fn deepseek_v4_direct_tokens_follow_the_declared_policy() {
         use librefang_types::config::ThinkingConfig;
         use librefang_types::model_catalog::ReasoningEchoPolicy;
         let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let declared = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
         for token in ["medium", "xhigh", "minimal"] {
             let mut req =
                 build_catalog_policy_test_request("deepseek-v4-pro", ReasoningEchoPolicy::Echo);
+            req.reasoning_policy.supported_efforts =
+                declared.iter().map(|s| (*s).to_string()).collect();
             req.thinking = Some(ThinkingConfig {
                 reasoning_effort: Some(ReasoningMode::new(token).expect("token")),
                 ..Default::default()
@@ -4644,6 +4652,23 @@ mod tests {
             );
             assert_eq!(wire["reasoning_effort"], token);
             assert!(wire.get("reasoning").is_none(), "{wire}");
+        }
+
+        // Undeclared model: the newer rungs are coerced to the nearest legacy
+        // rung, never forwarded.
+        for (token, expected) in [("medium", "low"), ("xhigh", "high"), ("minimal", "low")] {
+            let mut req =
+                build_catalog_policy_test_request("deepseek-v4-pro", ReasoningEchoPolicy::Echo);
+            req.thinking = Some(ThinkingConfig {
+                reasoning_effort: Some(ReasoningMode::new(token).expect("token")),
+                ..Default::default()
+            });
+            let oai = driver.build_request(&req).expect("build_request");
+            let wire = serde_json::to_value(&oai).expect("serialize");
+            assert_eq!(
+                wire["reasoning_effort"], expected,
+                "undeclared V4: {token} must be coerced, not sent verbatim"
+            );
         }
     }
 

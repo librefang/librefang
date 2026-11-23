@@ -455,6 +455,23 @@ const cacheKey = chatSessionCacheKey;
 const cacheGet = getCachedChatMessages<ChatMessage>;
 const cacheSet = setCachedChatMessages<ChatMessage>;
 
+/**
+ * The legacy `thinking` key for an outgoing turn frame or HTTP body.
+ *
+ * Refs #8616: the key was sent as `thinking: deepThinking` unconditionally, so
+ * an untouched toggle sent `false` on every turn — and the kernel's boolean
+ * arm clears the thinking config, erasing a per-session reasoning pin. While
+ * the user has never touched the toggle the key is omitted and the kernel
+ * inherits the pin / agent / global setting; once touched, the user's choice
+ * travels as before.
+ */
+export function thinkingFrameField(
+  deepThinking: boolean,
+  deepThinkingTouched: boolean,
+): { thinking?: boolean } {
+  return deepThinkingTouched ? { thinking: deepThinking } : {};
+}
+
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
 // Exported as a test seam: the turn lifecycle this hook owns (socket teardown, the
@@ -549,6 +566,7 @@ export function useChatMessages(
   const { ws, wsConnected, onDropRef, pendingCommandsRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
+  const deepThinkingTouched = useUIStore((s) => s.deepThinkingTouched);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   // The one-shot reasoning effort armed on the composer control. Read here
   // rather than passed down, because `sendMessage` is the single point every
@@ -998,7 +1016,9 @@ export function useChatMessages(
           agentId: sendAgentId,
           message: trimmed,
           options: {
-            thinking: deepThinking,
+            // Refs #8616: omit the legacy boolean until the user actually
+            // moves the toggle, so the kernel inherits the session pin.
+            ...thinkingFrameField(deepThinking, deepThinkingTouched),
             show_thinking: showThinkingProcess,
             reasoning_effort: turnReasoningEffort,
             session_id: sessionId,
@@ -1371,7 +1391,9 @@ export function useChatMessages(
         ws.current.send(JSON.stringify({
           type: "message",
           content: trimmed,
-          thinking: deepThinking,
+          // Refs #8616: see thinkingFrameField — an untouched toggle sends no
+          // `thinking` key, so a session pin is not erased on every frame.
+          ...thinkingFrameField(deepThinking, deepThinkingTouched),
           show_thinking: showThinkingProcess,
           // Per-message reasoning effort, only when the operator armed one
           // this turn (see `turnReasoningEffort` above).
@@ -1395,7 +1417,7 @@ export function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, nextReasoningEffort, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, setNextReasoningEffort, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
+  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, deepThinkingTouched, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, nextReasoningEffort, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, setNextReasoningEffort, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
