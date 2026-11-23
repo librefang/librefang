@@ -187,6 +187,7 @@ impl HandsControl for TrackingSendHandle {}
 impl A2ARegistry for TrackingSendHandle {}
 impl ChannelSender for TrackingSendHandle {}
 impl PromptStore for TrackingSendHandle {}
+impl SkillHistory for TrackingSendHandle {}
 impl WorkflowRunner for TrackingSendHandle {}
 impl GoalControl for TrackingSendHandle {}
 impl ToolPolicy for TrackingSendHandle {}
@@ -387,6 +388,7 @@ impl HandsControl for TrackingSpawnHandle {}
 impl A2ARegistry for TrackingSpawnHandle {}
 impl ChannelSender for TrackingSpawnHandle {}
 impl PromptStore for TrackingSpawnHandle {}
+impl SkillHistory for TrackingSpawnHandle {}
 impl WorkflowRunner for TrackingSpawnHandle {}
 impl GoalControl for TrackingSpawnHandle {}
 impl ToolPolicy for TrackingSpawnHandle {}
@@ -594,6 +596,7 @@ impl HandsControl for TrackingApprovalHandle {}
 impl A2ARegistry for TrackingApprovalHandle {}
 impl ChannelSender for TrackingApprovalHandle {}
 impl PromptStore for TrackingApprovalHandle {}
+impl SkillHistory for TrackingApprovalHandle {}
 impl WorkflowRunner for TrackingApprovalHandle {}
 impl GoalControl for TrackingApprovalHandle {}
 impl ToolPolicy for TrackingApprovalHandle {}

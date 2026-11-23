@@ -15,6 +15,7 @@
 //! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
 pub mod agent_tables;
+pub mod artifact_store;
 pub mod channel_binding_store;
 pub mod chunker;
 pub mod consolidation;
@@ -34,6 +35,7 @@ pub mod prompt;
 pub mod roster_store;
 pub mod semantic;
 pub mod session;
+pub mod skill_version_store;
 pub mod structured;
 pub mod template_version_store;
 pub mod usage;
@@ -43,6 +45,7 @@ mod session_store;
 mod substrate;
 #[cfg(test)]
 mod test_support;
+pub use artifact_store::{ArtifactRecord, ArtifactStore, PruneReport};
 pub use channel_binding_store::ChannelBindingStore;
 pub use ephemeral_run_store::{EphemeralRunRollup, EphemeralRunRow, EphemeralRunStore};
 pub use goal_run_store::{GoalRunRow, GoalRunStore};
@@ -50,6 +53,7 @@ pub use manifest_version_store::{ManifestVersionRow, ManifestVersionStore};
 pub use mcp_config_store::McpConfigStore;
 pub use passkey_store::{PasskeyRecord, PasskeyStore, PasskeyStoreError, SqlitePasskeyStore};
 pub use session_store::SessionStore;
+pub use skill_version_store::{SkillVersionRow, SkillVersionStore};
 pub use substrate::{
     compaction_summary_key, session_summary_key, MemorySubstrate, TaskQueueCaps,
     COMPACTION_SUMMARY_KEY_PREFIX, SESSION_SUMMARY_KEY_PREFIX,
