@@ -535,6 +535,173 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
     kernel.shutdown();
 }
 
+/// #8709: a REST/API turn has no channel or sender, so the post-approval wake
+/// path used to return early and leave its session stuck on `WaitingApproval`.
+/// This drives the aftermath end to end: the resolution patches the session the
+/// deferred tool actually ran in, wakes the idle agent, and the continuation
+/// turn is persisted there instead of in the registry's canonical session.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_resolution_without_channel_resumes_the_originating_session_8709() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::approval::ApprovalDecision;
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+    use librefang_types::tool::{DeferredToolExecution, ToolExecutionStatus};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "resumed after approval"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        mode: librefang_types::config::KernelMode::Stable,
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    let mut manifest = test_manifest("rest-approval", "REST approval resume", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // The REST body pinned a non-canonical session: that is where the deferred
+    // tool ran, and where the continuation has to land.
+    let pinned_session = librefang_types::agent::SessionId::new();
+    let tool_use_id = "toolu-rest-1".to_string();
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: pinned_session,
+            agent_id,
+            parent_session_id: None,
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                        id: tool_use_id.clone(),
+                        name: "file_write".to_string(),
+                        input: serde_json::json!({"path": "notes.txt"}),
+                        provider_metadata: None,
+                    }]),
+                    pinned: false,
+                    timestamp: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        tool_name: "file_write".to_string(),
+                        content: "waiting for approval".to_string(),
+                        is_error: false,
+                        status: ToolExecutionStatus::WaitingApproval,
+                        approval_request_id: Some("req-1".to_string()),
+                    }]),
+                    pinned: false,
+                    timestamp: None,
+                },
+            ],
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            reasoning_effort: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the pinned session should succeed");
+
+    let deferred = DeferredToolExecution {
+        agent_id: agent_id.0.to_string(),
+        tool_use_id: tool_use_id.clone(),
+        tool_name: "file_write".to_string(),
+        input: serde_json::json!({}),
+        allowed_tools: None,
+        allowed_env_vars: None,
+        exec_policy: None,
+        sender_id: None,
+        channel: None,
+        chat_id: None,
+        account_id: None,
+        workspace_root: None,
+        force_human: false,
+        session_id: Some(pinned_session),
+    };
+
+    kernel
+        .handle_approval_resolution(uuid::Uuid::new_v4(), ApprovalDecision::Denied, deferred)
+        .await;
+
+    let session = kernel
+        .memory
+        .substrate
+        .get_session(pinned_session)
+        .expect("read the pinned session")
+        .expect("the pinned session still exists");
+    let texts: Vec<String> = session
+        .messages
+        .iter()
+        .flat_map(|m| match &m.content {
+            MessageContent::Text(t) => vec![t.clone()],
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("resumed after approval")),
+        "the continuation turn must be persisted in the originating session: {texts:?}"
+    );
+    assert!(
+        session.messages.iter().any(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolResult { tool_use_id: id, status: ToolExecutionStatus::Denied, .. }
+                if id == &tool_use_id
+            )),
+            _ => false,
+        }),
+        "the resolved tool result must be terminal in that session: {:?}",
+        session.messages
+    );
+    assert_eq!(
+        backend
+            .received_requests()
+            .await
+            .expect("requests recorded")
+            .len(),
+        1,
+        "the wake path must actually run a continuation turn"
+    );
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_channel_message_resolves_named_instance_by_channel_type_8055() {
     // #8055: a sidecar channel whose `name` differs from its `channel_type` was unreachable from every outbound send.
