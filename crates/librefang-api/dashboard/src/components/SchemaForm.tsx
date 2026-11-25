@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
 import { useTranslation } from "react-i18next";
 import { type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
 import { useRegistrySchema } from "../lib/queries/config";
 import { Input } from "./ui/Input";
+import { ListField } from "./ui/ListField";
 import { Select } from "./ui/Select";
 import { Button } from "./ui/Button";
 import { Skeleton } from "./ui/Skeleton";
@@ -88,8 +89,10 @@ function validateRequired(
   return errors;
 }
 
-// Comma-separated array editor. The draft is local because a controlled input
-// whose value is the parsed array drops the comma the moment it is typed.
+// Array-of-scalars editor. `ListField` owns the draft: Enter or a typed
+// comma commits one value, and a pasted comma/semicolon/newline list splits
+// once. The old comma-text control rewrote the array on every keystroke, so
+// partial input and duplicates were discarded as they were typed.
 const ArrayField = memo(function ArrayField({
   fieldKey,
   field,
@@ -104,36 +107,38 @@ const ArrayField = memo(function ArrayField({
   hasError: boolean;
 }) {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState(() =>
-    Array.isArray(value) ? value.join(", ") : String(value ?? ""),
+  const id = useId();
+  const items = useMemo(
+    () =>
+      Array.isArray(value)
+        ? value
+            .filter(
+              (entry) =>
+                typeof entry === "string" ||
+                typeof entry === "number" ||
+                typeof entry === "boolean",
+            )
+            .map((entry) => String(entry))
+        : [],
+    [value],
   );
-  const lastEmitted = useRef<unknown>(value);
-
-  useEffect(() => {
-    if (value === lastEmitted.current) return;
-    lastEmitted.current = value;
-    setDraft(Array.isArray(value) ? value.join(", ") : String(value ?? ""));
-  }, [value]);
 
   return (
     <div className="space-y-1">
-      <Input
-        label={field.required ? `${fieldKey} *` : fieldKey}
-        value={draft}
-        onChange={(e) => {
-          const raw = e.target.value;
-          setDraft(raw);
-          const next = raw
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-          lastEmitted.current = next;
-          onChange(next);
-        }}
+      <label
+        htmlFor={id}
+        className="text-[10px] font-black uppercase tracking-widest text-text-dim"
+      >
+        {field.required ? `${fieldKey} *` : fieldKey}
+      </label>
+      <ListField
+        id={id}
+        value={items}
+        onChange={onChange}
+        invalid={hasError}
         placeholder={
           field.example != null ? String(field.example) : t("schema_form.comma_separated")
         }
-        className={hasError ? "border-error" : ""}
       />
       {field.description && (
         <p className="text-[10px] text-text-dim/60 pl-0.5">{field.description}</p>

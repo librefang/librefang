@@ -15,10 +15,12 @@ function Harness({
   initial = [],
   disabled,
   splitOnComma,
+  invalid,
 }: {
   initial?: string[];
   disabled?: boolean;
   splitOnComma?: boolean;
+  invalid?: boolean;
 }) {
   const [value, setValue] = useState(initial);
   return (
@@ -29,6 +31,7 @@ function Harness({
       ariaLabel="Items"
       disabled={disabled}
       splitOnComma={splitOnComma}
+      invalid={invalid}
     />
   );
 }
@@ -181,6 +184,12 @@ describe("ListField", () => {
 
     await user.keyboard("{Enter}");
     expect(screen.getByText("alpha beta")).toBeInTheDocument();
+  });
+
+  it("marks the input invalid for assistive technology", () => {
+    render(<Harness invalid />);
+
+    expect(getInput()).toHaveAttribute("aria-invalid", "true");
   });
 
   it("renders a single chip for duplicate values without rewriting the prop", () => {

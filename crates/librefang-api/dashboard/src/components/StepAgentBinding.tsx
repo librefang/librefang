@@ -30,6 +30,7 @@
 import type { AgentItem } from "../api";
 import type { CanvasNodeData } from "../lib/canvas";
 import { CANVAS_INPUT_CLASS, CANVAS_LABEL_CLASS, stepAgentPayload } from "../lib/canvas";
+import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 
 /** Which field of the step's `agent` binding the operator is authoring. */
 export type StepAgentSource = "instance" | "name" | "type";
@@ -365,20 +366,19 @@ export function StepAgentBinding({
       <label className={CANVAS_LABEL_CLASS} htmlFor="step-required-skills">
         {t("canvas.required_skills_label")}
       </label>
-      <input
+      <MultiSelectCmdk
         id="step-required-skills"
-        type="text"
-        list="step-required-skills-options"
-        value={value.requiredSkills}
+        ariaLabel={t("canvas.required_skills_label")}
+        options={skills}
+        value={parseRequiredSkills(value.requiredSkills)}
+        onChange={next => {
+          const items =
+            typeof next === "function" ? next(parseRequiredSkills(value.requiredSkills)) : next;
+          onChange({ ...value, requiredSkills: items.join(", ") });
+        }}
         placeholder={t("canvas.required_skills_placeholder")}
-        onChange={e => onChange({ ...value, requiredSkills: e.target.value })}
-        className={CANVAS_INPUT_CLASS}
+        allowFreeText
       />
-      <datalist id="step-required-skills-options">
-        {skills.map(name => (
-          <option key={name} value={name} />
-        ))}
-      </datalist>
       <p className="mt-1 text-[10px] leading-snug text-text-dim/70">
         {t("canvas.required_skills_hint")}
       </p>

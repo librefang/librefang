@@ -419,7 +419,8 @@ describe("StepAgentBinding", () => {
     const input = screen.getByLabelText("canvas.required_skills_label");
     expect(input).toHaveValue("");
 
-    await user.type(input, "browser-automation, pdf-extract");
+    await user.type(input, "browser-automation{enter}");
+    await user.type(input, "pdf-extract{enter}");
     const data = bindingToNodeData(last(seen), AGENTS);
     expect(data.requiredSkills).toEqual(["browser-automation", "pdf-extract"]);
     expect(stepAgentFields(data).required_skills).toEqual([
@@ -438,9 +439,9 @@ describe("StepAgentBinding", () => {
       />,
     );
 
-    // A stray comma must not become a blank requirement: the API rejects one with a 400 naming the step, so the workflow would stop saving at all.
-    await user.clear(screen.getByLabelText("canvas.required_skills_label"));
-    await user.type(screen.getByLabelText("canvas.required_skills_label"), " , ");
+    // Removing the chip leaves an empty requirement list; it is omitted from
+    // the payload rather than sent as `[]`.
+    await user.click(screen.getByRole("button", { name: "Remove pdf-extract" }));
     const data = bindingToNodeData(last(seen), AGENTS);
     expect(data.requiredSkills).toBeUndefined();
     expect(stepAgentFields(data).required_skills).toBeUndefined();
@@ -457,21 +458,18 @@ describe("StepAgentBinding", () => {
     );
 
     await user.selectOptions(screen.getByLabelText("canvas.agent_source_label"), "type");
-    expect(screen.getByLabelText("canvas.required_skills_label")).toHaveValue(
-      "browser-automation",
-    );
+    expect(screen.getByText("browser-automation")).toBeInTheDocument();
     expect(bindingToNodeData(last(seen), AGENTS).requiredSkills).toEqual([
       "browser-automation",
     ]);
   });
 
-  it("offers the loaded skills as datalist suggestions", () => {
+  it("offers the loaded skills as selectable options", async () => {
+    const user = userEvent.setup();
     render(<Harness initial={EMPTY} onValue={vi.fn()} />);
-    const input = screen.getByLabelText("canvas.required_skills_label");
-    const list = document.getElementById(input.getAttribute("list")!);
-    expect([...list!.querySelectorAll("option")].map(o => o.getAttribute("value"))).toEqual(
-      SKILLS,
-    );
+    await user.click(screen.getByLabelText("canvas.required_skills_label"));
+    expect(await screen.findByRole("option", { name: "browser-automation" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "pdf-extract" })).toBeInTheDocument();
   });
 
   it("offers every known agent name as a datalist suggestion", () => {
