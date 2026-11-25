@@ -20,30 +20,30 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.105.1",
+    "@tanstack/react-query": "^5.108.3",
     "clsx": "^2.1.1",
-    "framer-motion": "^14.9.0",
-    "lucide-react": "^1.66.0",
+    "framer-motion": "^14.14.0",
+    "lucide-react": "^1.77.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "tailwind-merge": "^3.7.0",
+    "tailwind-merge": "^3.7.1",
     "zod": "^4.6.7",
-    "zustand": "^5.0.16"
+    "zustand": "^5.1.0"
   },
   "devDependencies": {
-    "@lhci/cli": "0.15.1",
-    "@playwright/test": "^1.64.1",
-    "@tailwindcss/postcss": "^4.3.3",
+    "@lhci/cli": "0.16.1",
+    "@playwright/test": "^1.65.1",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
-    "autoprefixer": "^10.6.2",
-    "jsdom": "^31.0.0",
-    "postcss": "^8.5.32",
-    "tailwindcss": "^4.3.3",
+    "@vitejs/plugin-react": "^6.3.0",
+    "autoprefixer": "^10.7.0",
+    "jsdom": "^31.0.1",
+    "postcss": "^8.5.33",
+    "tailwindcss": "^4.3.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5",
-    "vitest": "^5.0.5"
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
   }
 }
