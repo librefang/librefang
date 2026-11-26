@@ -882,11 +882,17 @@ pub(super) async fn precheck_loop_guard(
     let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
     match &verdict {
         LoopGuardVerdict::CircuitBreak(msg) => {
-            if streaming {
-                warn!(tool = %tool_call.name, "Circuit breaker triggered (streaming)");
-            } else {
-                warn!(tool = %tool_call.name, "Circuit breaker triggered");
-            }
+            // Record the decision with enough context to reconstruct why the
+            // turn was cut: a bare tool name cannot tell a runaway loop from a
+            // legitimate call.
+            warn!(
+                agent_id = %agent_id_str,
+                tool = %tool_call.name,
+                session_id = %session.id,
+                streaming,
+                reason = %msg,
+                "Circuit breaker triggered"
+            );
             repair_session_before_save(session, agent_id_str, "circuit_breaker");
             if !opts.is_fork && !opts.incognito {
                 if let Err(e) = memory.save_session_async(session).await {
@@ -908,11 +914,14 @@ pub(super) async fn precheck_loop_guard(
             LoopGuardPrecheck::CircuitBreak(LibreFangError::Internal(msg.clone()))
         }
         LoopGuardVerdict::Block(msg) => {
-            if streaming {
-                warn!(tool = %tool_call.name, "Tool call blocked by loop guard (streaming)");
-            } else {
-                warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
-            }
+            warn!(
+                agent_id = %agent_id_str,
+                tool = %tool_call.name,
+                session_id = %session.id,
+                streaming,
+                reason = %msg,
+                "Tool call blocked by loop guard"
+            );
             // A loop-guard block is a soft outcome, not a hard failure: its
             // whole purpose is to stop a repeating call and let the model pick a
             // different action. Marking it `Error` made it a hard error that
@@ -934,7 +943,18 @@ pub(super) async fn precheck_loop_guard(
                 execution_ms: None,
             }))
         }
-        _ => LoopGuardPrecheck::Proceed(verdict),
+        LoopGuardVerdict::Warn(msg) => {
+            warn!(
+                agent_id = %agent_id_str,
+                tool = %tool_call.name,
+                session_id = %session.id,
+                streaming,
+                reason = %msg,
+                "Loop guard warned about a repeated tool call"
+            );
+            LoopGuardPrecheck::Proceed(verdict)
+        }
+        LoopGuardVerdict::Allow => LoopGuardPrecheck::Proceed(verdict),
     }
 }
 
@@ -963,6 +983,11 @@ pub(super) fn record_loop_guard_outcome(
     if let Some(msg) =
         loop_guard.record_outcome(&tool_call.name, &tool_call.input, &executed.result.content)
     {
+        warn!(
+            tool = %tool_call.name,
+            reason = %msg,
+            "Loop guard warned about a repeated tool result"
+        );
         executed.final_content = format!("{}\n\n[LOOP GUARD] {}", executed.final_content, msg);
     }
 
