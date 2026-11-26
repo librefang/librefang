@@ -12,6 +12,12 @@ import { UserPolicyPage } from "./UserPolicyPage";
 import { usePermissionPolicy } from "../lib/queries/permissionPolicy";
 import { useUpdateUserPolicy } from "../lib/mutations/users";
 
+/** Type one value into a chip-based list field and commit it with Enter. */
+function addListValue(input: HTMLElement, value: string) {
+  fireEvent.change(input, { target: { value } });
+  fireEvent.keyDown(input, { key: "Enter" });
+}
+
 vi.mock("../lib/queries/permissionPolicy", () => ({
   usePermissionPolicy: vi.fn(),
 }));
@@ -143,19 +149,11 @@ describe("UserPolicyPage", () => {
 
     renderPage();
 
-    // Tool-policy section is enabled (has data) — its allowed/denied
-    // textareas should be populated.
-    const allowedTextarea = screen.getByDisplayValue("read_*");
-    const deniedTextarea = screen.getByDisplayValue("delete_*");
-    expect(allowedTextarea.tagName).toBe("TEXTAREA");
-    expect(deniedTextarea.tagName).toBe("TEXTAREA");
-
-    // Memory readable namespaces seeded as newline-joined string. RTL
-    // collapses whitespace in display-value matches; check via DOM value.
-    const textareas = Array.from(
-      document.querySelectorAll<HTMLTextAreaElement>("textarea"),
-    );
-    expect(textareas.some(t => t.value === "public\nalice")).toBe(true);
+    // Tool-policy lists and memory namespaces render as removable chips.
+    expect(screen.getByText("read_*")).toBeInTheDocument();
+    expect(screen.getByText("delete_*")).toBeInTheDocument();
+    expect(screen.getByText("public")).toBeInTheDocument();
+    expect(screen.getAllByText("alice").length).toBeGreaterThan(0);
 
     // Custom (non-default) channels are not in HAPPY_POLICY, so the count
     // badge equals 4 default channels (telegram already in defaults).
@@ -173,10 +171,7 @@ describe("UserPolicyPage", () => {
     renderPage();
 
     // Add a new allowed tool to mark the form dirty.
-    const allowedTextarea = screen.getByDisplayValue("read_*") as HTMLTextAreaElement;
-    fireEvent.change(allowedTextarea, {
-      target: { value: "read_*\nlist_*" },
-    });
+    addListValue(screen.getAllByLabelText("Allowed tools")[0], "list_*");
 
     // Two Save buttons (header + sticky bar). Click the first.
     const saveButtons = screen.getAllByRole("button", { name: /Save/ });
@@ -201,6 +196,21 @@ describe("UserPolicyPage", () => {
     });
   });
 
+  it("keeps a comma-bearing pattern as one value", () => {
+    usePermissionPolicyMock.mockReturnValue({
+      data: HAPPY_POLICY,
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    renderPage();
+
+    addListValue(screen.getAllByLabelText("Allowed tools")[0], "^(foo|bar){2,3}$");
+
+    expect(screen.getByText("^(foo|bar){2,3}$")).toBeInTheDocument();
+  });
+
   it("blocks save when writable namespace is not a subset of readable", () => {
     usePermissionPolicyMock.mockReturnValue({
       data: HAPPY_POLICY,
@@ -211,9 +221,8 @@ describe("UserPolicyPage", () => {
 
     renderPage();
 
-    // Replace writable list with a namespace not in readable.
-    const writable = screen.getByDisplayValue("alice") as HTMLTextAreaElement;
-    fireEvent.change(writable, { target: { value: "secret" } });
+    // Add a writable namespace that is not in readable.
+    addListValue(screen.getByLabelText("Writable namespaces"), "secret");
 
     // The validation banner appears and Save in the sticky bar disables.
     expect(
@@ -226,7 +235,10 @@ describe("UserPolicyPage", () => {
 
   it("blocks save when allowed tools contains a duplicate entry", () => {
     usePermissionPolicyMock.mockReturnValue({
-      data: HAPPY_POLICY,
+      data: {
+        ...HAPPY_POLICY,
+        tool_policy: { allowed_tools: ["read_*", "read_*"], denied_tools: ["delete_*"] },
+      },
       isLoading: false,
       isError: false,
       error: null,
@@ -234,9 +246,8 @@ describe("UserPolicyPage", () => {
 
     renderPage();
 
-    const allowed = screen.getByDisplayValue("read_*") as HTMLTextAreaElement;
-    fireEvent.change(allowed, { target: { value: "read_*\nread_*" } });
-
+    // The chip editor drops duplicates the operator types, so this guards a
+    // policy the server already stored with one.
     expect(
       screen.getByText(/contains duplicate entry 'read_\*'/),
     ).toBeInTheDocument();
@@ -334,8 +345,7 @@ describe("UserPolicyPage", () => {
     }));
 
     const page = renderPage();
-    const allowed = screen.getByDisplayValue("read_*") as HTMLTextAreaElement;
-    fireEvent.change(allowed, { target: { value: "read_*\nlist_*" } });
+    addListValue(screen.getAllByLabelText("Allowed tools")[0], "list_*");
 
     policy = {
       ...HAPPY_POLICY,
@@ -343,8 +353,8 @@ describe("UserPolicyPage", () => {
     };
     page.rerenderPage();
 
-    expect(allowed.value).toBe("read_*\nlist_*");
-    expect(screen.getByDisplayValue("server_denied")).toBeInTheDocument();
+    expect(screen.getByText("list_*")).toBeInTheDocument();
+    expect(screen.getByText("server_denied")).toBeInTheDocument();
   });
 
   it("refreshes a clean form when the server policy changes", async () => {
@@ -364,7 +374,7 @@ describe("UserPolicyPage", () => {
     page.rerenderPage();
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue("server_refresh")).toBeInTheDocument();
+      expect(screen.getByText("server_refresh")).toBeInTheDocument();
     });
   });
 
@@ -378,8 +388,7 @@ describe("UserPolicyPage", () => {
 
     renderPage();
 
-    const allowed = screen.getByDisplayValue("read_*") as HTMLTextAreaElement;
-    fireEvent.change(allowed, { target: { value: "read_*\nlist_*" } });
+    addListValue(screen.getAllByLabelText("Allowed tools")[0], "list_*");
 
     fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[0]);
 
@@ -406,8 +415,7 @@ describe("UserPolicyPage", () => {
 
     renderPage();
 
-    const allowed = screen.getByDisplayValue("read_*") as HTMLTextAreaElement;
-    fireEvent.change(allowed, { target: { value: "read_*\nlist_*" } });
+    addListValue(screen.getAllByLabelText("Allowed tools")[0], "list_*");
 
     fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[0]);
 

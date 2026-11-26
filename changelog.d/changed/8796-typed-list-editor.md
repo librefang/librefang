@@ -1,0 +1,1 @@
+The dashboard's remaining string-list fields use the shared chip editor instead of comma text: schema arrays, a workflow step's required skills, and the user policy allow/deny lists. (#8796) (@DaBlitzStein)

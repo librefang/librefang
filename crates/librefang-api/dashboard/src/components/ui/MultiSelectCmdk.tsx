@@ -9,6 +9,10 @@ interface MultiSelectCmdkProps {
   onChange: (next: string[] | ((prev: string[]) => string[])) => void;
   placeholder?: string;
   disabled?: boolean;
+  /** DOM id for the search input, so a surrounding `<label htmlFor>` targets it. */
+  id?: string;
+  /** Accessible name when the field is not wrapped in a label. */
+  ariaLabel?: string;
   /**
    * Optional metadata for each option. When provided, the entry's
    * `description` is rendered as a secondary line in the dropdown and
@@ -34,6 +38,8 @@ export function MultiSelectCmdk({
   onChange,
   placeholder = "Search…",
   disabled = false,
+  id,
+  ariaLabel,
   optionMeta,
   allowFreeText = false,
 }: MultiSelectCmdkProps) {
@@ -186,6 +192,8 @@ export function MultiSelectCmdk({
         <Command className="flex flex-1 items-center min-w-[120px]" shouldFilter={false}>
           <Command.Input
             ref={inputRef}
+            id={id}
+            aria-label={ariaLabel}
             value={search}
             onValueChange={setSearch}
             onFocus={handleInputFocus}

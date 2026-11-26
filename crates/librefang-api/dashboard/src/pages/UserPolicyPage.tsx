@@ -23,6 +23,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { ListField } from "../components/ui/ListField";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { usePermissionPolicy } from "../lib/queries/permissionPolicy";
@@ -510,28 +511,28 @@ export function UserPolicyPage() {
         />
         {form.tool_policy.enabled && (
           <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <Textarea
+            <PolicyListField
               label={t("user_policy.allowed_tools", "Allowed tools")}
               hint={t(
                 "user_policy.glob_hint",
-                "One pattern per line. Glob with `*` allowed.",
+                "Add one pattern at a time; a pasted list separated by new lines is split. Glob with `*` allowed.",
               )}
-              value={form.tool_policy.allowed}
+              value={parseList(form.tool_policy.allowed)}
               onChange={value =>
                 editForm(f => ({
                   ...f,
-                  tool_policy: { ...f.tool_policy, allowed: value },
+                  tool_policy: { ...f.tool_policy, allowed: formatList(value) },
                 }))
               }
             />
-            <Textarea
+            <PolicyListField
               label={t("user_policy.denied_tools", "Denied tools")}
               hint={t("user_policy.glob_hint_deny", "Always wins over allow.")}
-              value={form.tool_policy.denied}
+              value={parseList(form.tool_policy.denied)}
               onChange={value =>
                 editForm(f => ({
                   ...f,
-                  tool_policy: { ...f.tool_policy, denied: value },
+                  tool_policy: { ...f.tool_policy, denied: formatList(value) },
                 }))
               }
             />
@@ -556,28 +557,28 @@ export function UserPolicyPage() {
         />
         {form.tool_categories.enabled && (
           <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <Textarea
+            <PolicyListField
               label={t("user_policy.allowed_groups", "Allowed groups")}
               hint={t(
                 "user_policy.group_hint",
-                "One group name per line (e.g. `web_tools`).",
+                "Add one group name at a time (e.g. `web_tools`); a pasted newline-separated list is split.",
               )}
-              value={form.tool_categories.allowed}
+              value={parseList(form.tool_categories.allowed)}
               onChange={value =>
                 editForm(f => ({
                   ...f,
-                  tool_categories: { ...f.tool_categories, allowed: value },
+                  tool_categories: { ...f.tool_categories, allowed: formatList(value) },
                 }))
               }
             />
-            <Textarea
+            <PolicyListField
               label={t("user_policy.denied_groups", "Denied groups")}
               hint={t("user_policy.glob_hint_deny", "Always wins over allow.")}
-              value={form.tool_categories.denied}
+              value={parseList(form.tool_categories.denied)}
               onChange={value =>
                 editForm(f => ({
                   ...f,
-                  tool_categories: { ...f.tool_categories, denied: value },
+                  tool_categories: { ...f.tool_categories, denied: formatList(value) },
                 }))
               }
             />
@@ -603,31 +604,31 @@ export function UserPolicyPage() {
         {form.memory_access.enabled && (
           <div className="mt-4 flex flex-col gap-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <Textarea
+              <PolicyListField
                 label={t("user_policy.readable_ns", "Readable namespaces")}
                 hint={t(
                   "user_policy.ns_hint",
-                  "One namespace per line. `*` matches all.",
+                  "Add one namespace at a time; a pasted newline-separated list is split. `*` matches all.",
                 )}
-                value={form.memory_access.readable}
+                value={parseList(form.memory_access.readable)}
                 onChange={value =>
                   editForm(f => ({
                     ...f,
-                    memory_access: { ...f.memory_access, readable: value },
+                    memory_access: { ...f.memory_access, readable: formatList(value) },
                   }))
                 }
               />
-              <Textarea
+              <PolicyListField
                 label={t("user_policy.writable_ns", "Writable namespaces")}
                 hint={t(
                   "user_policy.writable_hint",
                   "Must be a subset of readable.",
                 )}
-                value={form.memory_access.writable}
+                value={parseList(form.memory_access.writable)}
                 onChange={value =>
                   editForm(f => ({
                     ...f,
-                    memory_access: { ...f.memory_access, writable: value },
+                    memory_access: { ...f.memory_access, writable: formatList(value) },
                   }))
                 }
               />
@@ -722,28 +723,28 @@ export function UserPolicyPage() {
                   ) : null}
                 </div>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <Textarea
+                  <PolicyListField
                     label={t("user_policy.allowed_tools", "Allowed tools")}
-                    value={rule.allowed}
+                    value={parseList(rule.allowed)}
                     onChange={value =>
                       editForm(f => ({
                         ...f,
                         channel_tool_rules: {
                           ...f.channel_tool_rules,
-                          [ch]: { ...f.channel_tool_rules[ch], allowed: value },
+                          [ch]: { ...f.channel_tool_rules[ch], allowed: formatList(value) },
                         },
                       }))
                     }
                   />
-                  <Textarea
+                  <PolicyListField
                     label={t("user_policy.denied_tools", "Denied tools")}
-                    value={rule.denied}
+                    value={parseList(rule.denied)}
                     onChange={value =>
                       editForm(f => ({
                         ...f,
                         channel_tool_rules: {
                           ...f.channel_tool_rules,
-                          [ch]: { ...f.channel_tool_rules[ch], denied: value },
+                          [ch]: { ...f.channel_tool_rules[ch], denied: formatList(value) },
                         },
                       }))
                     }
@@ -893,14 +894,14 @@ function SectionHeader({ title, description, enabled, onToggle }: SectionHeaderP
   );
 }
 
-interface TextareaProps {
+interface PolicyListFieldProps {
   label: string;
   hint?: string;
-  value: string;
-  onChange: (value: string) => void;
+  value: string[];
+  onChange: (value: string[]) => void;
 }
 
-function Textarea({ label, hint, value, onChange }: TextareaProps) {
+function PolicyListField({ label, hint, value, onChange }: PolicyListFieldProps) {
   const reactId = useId();
   const id = `${reactId}-${label.toLowerCase().replace(/\s+/g, "-")}`;
   return (
@@ -908,12 +909,7 @@ function Textarea({ label, hint, value, onChange }: TextareaProps) {
       <label htmlFor={id} className="text-[10px] font-black uppercase tracking-widest text-text-dim">
         {label}
       </label>
-      <textarea
-        id={id}
-        className="w-full min-h-[100px] rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:outline-none focus:ring-2 focus:ring-brand/40"
-        value={value}
-        onChange={e => onChange(e.target.value)}
-      />
+      <ListField id={id} ariaLabel={label} value={value} onChange={onChange} splitOnComma={false} />
       {hint && <p className="text-[11px] text-text-dim">{hint}</p>}
     </div>
   );

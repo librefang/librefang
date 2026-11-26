@@ -20,6 +20,7 @@ export function ListField({
   disabled = false,
   id,
   ariaLabel,
+  invalid = false,
   splitOnComma = true,
 }: {
   value: string[];
@@ -28,6 +29,8 @@ export function ListField({
   disabled?: boolean;
   id?: string;
   ariaLabel?: string;
+  /** Marks the control as failed validation for assistive technology. */
+  invalid?: boolean;
   splitOnComma?: boolean;
 }) {
   const { t } = useTranslation();
@@ -74,7 +77,9 @@ export function ListField({
 
   return (
     <div
-      className={`flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-brand ${
+      className={`flex flex-wrap items-center gap-1.5 rounded-lg border bg-main px-2 py-1.5 focus-within:border-brand ${
+        invalid ? "border-error" : "border-border-subtle"
+      } ${
         disabled ? "opacity-60" : ""
       }`}
     >
@@ -102,6 +107,7 @@ export function ListField({
         value={inputValue}
         disabled={disabled}
         aria-label={ariaLabel}
+        aria-invalid={invalid || undefined}
         onChange={(e) => setInputValue(e.target.value)}
         placeholder={items.length === 0 ? placeholder : undefined}
         onKeyDown={(e) => {
